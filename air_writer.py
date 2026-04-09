@@ -1,18 +1,4 @@
-"""
-AIR WRITER — Draw words in the air with your finger
-=====================================================
-Point your index finger to write. Open palm to lift the pen.
 
-Controls:
-  Index finger pointed  →  Draw
-  Open palm / fist       →  Stop drawing (pen up)
-  C                      →  Cycle color
-  X                      →  Clear canvas
-  Z                      →  Undo last stroke
-  +/-                    →  Thickness up/down
-  S                      →  Save drawing as PNG
-  Q / ESC                →  Quit
-"""
 
 import cv2
 import mediapipe as mp
@@ -24,9 +10,7 @@ import math
 import os
 import urllib.request
 
-# ─────────────────────────────────────────────────────────────
-# CONFIG
-# ─────────────────────────────────────────────────────────────
+
 CAMERA_INDEX = 0
 FRAME_W, FRAME_H = 1280, 720
 
@@ -48,11 +32,9 @@ COLORS = [
 SMOOTHING = 0.45          # point smoothing (0=none, 1=max)
 MIN_DRAW_DIST = 4         # min px between points to avoid blobs
 DEFAULT_THICKNESS = 4
+ERASER_RADIUS = 30        # eraser circle radius in px
 
 
-# ─────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────
 def ensure_model(url, path):
     if os.path.exists(path):
         return
@@ -100,9 +82,7 @@ def detect_gesture(landmarks):
         return "OTHER"
 
 
-# ─────────────────────────────────────────────────────────────
-# DRAWING STATE
-# ─────────────────────────────────────────────────────────────
+
 class AirCanvas:
     def __init__(self, w, h):
         self.w = w
@@ -162,6 +142,20 @@ class AirCanvas:
         self.current_stroke = None
         self.prev_point = None
 
+    def erase_at(self, x, y, radius=ERASER_RADIUS):
+        """Remove any strokes that have points within radius of (x, y)."""
+        surviving = []
+        for stroke in self.strokes:
+            color, thick, pts = stroke
+            hit = False
+            for px, py in pts:
+                if math.hypot(px - x, py - y) < radius:
+                    hit = True
+                    break
+            if not hit:
+                surviving.append(stroke)
+        self.strokes = surviving
+
     def cycle_color(self):
         self.color_idx = (self.color_idx + 1) % len(COLORS)
 
@@ -191,9 +185,7 @@ class AirCanvas:
         cv2.polylines(frame, [pts_arr], False, color, thick, cv2.LINE_AA)
 
 
-# ─────────────────────────────────────────────────────────────
-# HUD
-# ─────────────────────────────────────────────────────────────
+
 def draw_hud(frame, canvas, gesture, fps, w, h):
     """Draw minimal HUD."""
     # Top-left info panel
@@ -230,6 +222,10 @@ def draw_hud(frame, canvas, gesture, fps, w, h):
         cv2.circle(frame, (w - 25, 25), 10, (0, 255, 100), -1, cv2.LINE_AA)
         cv2.putText(frame, "DRAWING", (w - 110, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 100), 1, cv2.LINE_AA)
+    elif gesture == "PEACE":
+        cv2.circle(frame, (w - 25, 25), 10, (180, 100, 255), -1, cv2.LINE_AA)
+        cv2.putText(frame, "ERASING", (w - 115, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 100, 255), 1, cv2.LINE_AA)
     else:
         cv2.circle(frame, (w - 25, 25), 10, (80, 80, 80), -1, cv2.LINE_AA)
         cv2.putText(frame, "PEN UP", (w - 100, 30),
@@ -251,6 +247,20 @@ def draw_hud(frame, canvas, gesture, fps, w, h):
                 cv2.FONT_HERSHEY_SIMPLEX, 0.4, (100, 100, 100), 1, cv2.LINE_AA)
 
 
+def draw_eraser_cursor(frame, x, y):
+    """Draw an eraser cursor (pink dashed circle)."""
+    # Outer glow
+    overlay = frame.copy()
+    cv2.circle(overlay, (x, y), ERASER_RADIUS + 4, (180, 100, 255), -1, cv2.LINE_AA)
+    cv2.addWeighted(overlay, 0.1, frame, 0.9, 0, frame)
+    # Eraser ring
+    cv2.circle(frame, (x, y), ERASER_RADIUS, (180, 100, 255), 2, cv2.LINE_AA)
+    # Inner cross
+    s = 6
+    cv2.line(frame, (x - s, y - s), (x + s, y + s), (180, 100, 255), 1, cv2.LINE_AA)
+    cv2.line(frame, (x + s, y - s), (x - s, y + s), (180, 100, 255), 1, cv2.LINE_AA)
+
+
 def draw_fingertip_cursor(frame, x, y, color, drawing):
     """Draw a cursor at the fingertip position."""
     if drawing:
@@ -265,9 +275,7 @@ def draw_fingertip_cursor(frame, x, y, color, drawing):
         cv2.circle(frame, (x, y), 8, color, 1, cv2.LINE_AA)
 
 
-# ─────────────────────────────────────────────────────────────
-# MAIN
-# ─────────────────────────────────────────────────────────────
+
 def main():
     ensure_model(HAND_MODEL_URL, HAND_MODEL_PATH)
 
@@ -341,12 +349,17 @@ def main():
             tip_y = int(tip.y * h)
 
             is_drawing = gesture == "POINT"
+            is_erasing = gesture == "PEACE"
 
             if is_drawing:
                 if not was_drawing:
                     canvas.begin_stroke(tip_x, tip_y)
                 else:
                     canvas.add_point(tip_x, tip_y)
+            elif is_erasing:
+                if was_drawing:
+                    canvas.end_stroke()
+                canvas.erase_at(tip_x, tip_y)
             else:
                 if was_drawing:
                     canvas.end_stroke()
@@ -354,7 +367,10 @@ def main():
             was_drawing = is_drawing
 
             # Draw cursor
-            draw_fingertip_cursor(frame, tip_x, tip_y, canvas.color, is_drawing)
+            if is_erasing:
+                draw_eraser_cursor(frame, tip_x, tip_y)
+            else:
+                draw_fingertip_cursor(frame, tip_x, tip_y, canvas.color, is_drawing)
         else:
             if was_drawing:
                 canvas.end_stroke()
